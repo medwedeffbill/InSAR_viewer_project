@@ -1,0 +1,42 @@
+id: mt_rainier
+name: "Mt. Rainier Volcanic Deformation"
+description: >
+  Subtle inflation and deflation of the Mt. Rainier volcanic edifice related
+  to hydrothermal activity and magmatic system dynamics. InSAR is particularly
+  useful here because most of the deformation signal is masked from GPS networks
+  by the dense old-growth forest and glacial cover.
+bbox: [-122.10, 46.70, -121.50, 47.10]
+center: [-121.80, 46.90]
+zoom: 11
+featured: true
+case_study: "volcanic-inflation"
+
+sentinel1:
+  relative_orbit: 115
+  flight_direction: ascending
+  polarization: VV
+
+date_range:
+  start: "2021-01-01"
+  end: "2024-06-01"
+
+hyp3:
+  job_type: INSAR_GAMMA
+  looks: "10x2"
+  include_dem: true
+  include_inc_map: true
+  apply_water_mask: false    # high-elevation glaciers, no open water
+  max_jobs: 200
+
+mintpy:
+  processor: hyp3
+  min_coherence: 0.35        # coherence lower on glaciated terrain
+  max_temporal_baseline: 36
+  max_spatial_baseline: 150
+  dem_error_correction: true
+  tropospheric_correction: pyaps
+
+display:
+  colorscale: RdBu_r
+  vmin: -10
+  vmax: 10

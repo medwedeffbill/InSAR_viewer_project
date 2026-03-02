@@ -1,0 +1,42 @@
+id: seattle
+name: "Seattle / Puget Sound Subsidence"
+description: >
+  Urban subsidence driven by groundwater withdrawal, sediment compaction, and
+  infrastructure loading across the Seattle metropolitan area. Sentinel-1
+  descending passes capture strong LOS signal for north-south trending subsidence bowls.
+bbox: [-122.55, 47.30, -121.95, 47.80]   # [west, south, east, north]
+center: [-122.25, 47.55]
+zoom: 10
+featured: true
+case_study: "seattle-subsidence"
+
+sentinel1:
+  relative_orbit: 137
+  flight_direction: descending
+  polarization: VV
+
+date_range:
+  start: "2021-01-01"
+  end: "2024-06-01"
+
+hyp3:
+  job_type: INSAR_GAMMA
+  looks: "10x2"             # range x azimuth
+  include_dem: true
+  include_inc_map: true
+  include_look_vectors: false
+  apply_water_mask: true
+  max_jobs: 200
+
+mintpy:
+  processor: hyp3
+  min_coherence: 0.4
+  max_temporal_baseline: 48   # days
+  max_spatial_baseline: 150   # metres
+  dem_error_correction: true
+  tropospheric_correction: pyaps  # or gacos if account available
+
+display:
+  colorscale: RdBu_r   # velocity colorscale
+  vmin: -30            # mm/yr
+  vmax: 30             # mm/yr

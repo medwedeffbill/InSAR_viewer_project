@@ -1,0 +1,42 @@
+id: portuguese_bend
+name: "Portuguese Bend Landslide, CA"
+description: >
+  One of the most active slow-moving landslides in the United States, located
+  on the Palos Verdes Peninsula near Los Angeles. Sentinel-1 time series reveal
+  seasonal acceleration patterns tied to rainfall and groundwater, with rates
+  exceeding 100 mm/yr in the most active lobes.
+bbox: [-118.42, 33.72, -118.30, 33.80]
+center: [-118.36, 33.76]
+zoom: 13
+featured: true
+case_study: "landslide-creep"
+
+sentinel1:
+  relative_orbit: 71
+  flight_direction: descending
+  polarization: VV
+
+date_range:
+  start: "2020-01-01"
+  end: "2024-06-01"
+
+hyp3:
+  job_type: INSAR_GAMMA
+  looks: "5x1"       # finer looks for this small, high-rate AOI
+  include_dem: true
+  include_inc_map: true
+  apply_water_mask: true
+  max_jobs: 300      # more pairs for longer record
+
+mintpy:
+  processor: hyp3
+  min_coherence: 0.3          # challenging decorrelation on active slide
+  max_temporal_baseline: 24   # short baselines to avoid decorrelation
+  max_spatial_baseline: 100
+  dem_error_correction: true
+  tropospheric_correction: pyaps
+
+display:
+  colorscale: plasma
+  vmin: -150
+  vmax: 10
