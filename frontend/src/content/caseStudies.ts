@@ -77,7 +77,7 @@ An **Isolation Forest** model was trained on five features derived from this dec
 2. Trend magnitude |mm/yr|
 3. Seasonal amplitude
 4. Trend acceleration (curvature)
-5. Change-point score (PELT algorithm via `ruptures`)
+5. Change-point score (PELT algorithm via *ruptures*)
 
 Pixels were flagged as anomalous at a threshold of **score ≥ 0.65** (top ~35% of Isolation
 Forest output, tuned to balance sensitivity and specificity).

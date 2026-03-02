@@ -29,12 +29,12 @@ function InSARExplainer() {
         {
           icon: '📡',
           title: 'What InSAR measures',
-          body: 'Interferometric Synthetic Aperture Radar (InSAR) uses phase differences between repeat satellite radar acquisitions to measure surface displacement along the satellite's line-of-sight (LOS) direction. Sentinel-1 revisits every 6–12 days at 5.6 cm wavelength, resolving motion at millimeter precision.',
+          body: "Interferometric Synthetic Aperture Radar (InSAR) uses phase differences between repeat satellite radar acquisitions to measure surface displacement along the satellite's line-of-sight (LOS) direction. Sentinel-1 revisits every 6–12 days at 5.6 cm wavelength, resolving motion at millimeter precision.",
         },
         {
           icon: '🤖',
           title: 'What "anomaly" means',
-          body: 'Each pixel's displacement time series is decomposed into trend, seasonal, and residual components (STL). An Isolation Forest model scores pixels by how unusual their feature vector is — high residual variance, large trend magnitude, accelerating rates, or change points all elevate the score.',
+          body: "Each pixel's displacement time series is decomposed into trend, seasonal, and residual components (STL). An Isolation Forest model scores pixels by how unusual their feature vector is — high residual variance, large trend magnitude, accelerating rates, or change points all elevate the score.",
         },
         {
           icon: '⚠️',

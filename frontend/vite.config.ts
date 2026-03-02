@@ -8,9 +8,8 @@ export default defineConfig({
       '@': '/src',
     },
   },
-  // Allow zarr and geotiff to work in browser
   optimizeDeps: {
-    include: ['zarr', 'geotiff'],
+    include: ['geotiff'],
   },
   build: {
     rollupOptions: {
@@ -18,7 +17,6 @@ export default defineConfig({
         manualChunks: {
           maplibre: ['maplibre-gl'],
           charts:   ['recharts'],
-          zarr:     ['zarr'],
         },
       },
     },
