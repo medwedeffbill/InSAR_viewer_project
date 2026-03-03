@@ -43,7 +43,14 @@ def load_config(config_path: Path) -> dict:
 
 
 def search_granules(cfg: dict) -> list[asf.ASFProduct]:
-    """Search ASF for Sentinel-1 SLC granules covering the AOI."""
+    """
+    Search ASF for Sentinel-1 SLC granules covering the AOI.
+
+    Strategy:
+      1. Search broadly (no orbit filter) to discover what tracks exist.
+      2. If relative_orbit is set in config AND results exist for it, use that track.
+      3. Otherwise, auto-select the track with the most granules and log a recommendation.
+    """
     west, south, east, north = cfg["bbox"]
     wkt = f"POLYGON(({west} {south},{east} {south},{east} {north},{west} {north},{west} {south}))"
 
@@ -52,19 +59,55 @@ def search_granules(cfg: dict) -> list[asf.ASFProduct]:
 
     log.info("Searching ASF for S1 granules in %s ...", cfg["name"])
     results = asf.search(
-        platform=asf.PLATFORM.SENTINEL1,
-        processingLevel=asf.PROCESSING_LEVEL.SLC,
+        platform=["SENTINEL-1"],
+        processingLevel=["SLC"],
         intersectsWith=wkt,
         start=date_cfg["start"],
         end=date_cfg["end"],
         flightDirection=s1["flight_direction"].upper(),
-        relativeOrbit=s1["relative_orbit"],
-        polarization=s1["polarization"],
-        maxResults=500,
+        maxResults=2000,
     )
 
-    log.info("Found %d granules.", len(results))
-    return list(results)
+    if not results:
+        log.error(
+            "No granules found for %s %s. "
+            "Try changing flight_direction in the config to 'ascending'.",
+            s1["flight_direction"].upper(), cfg["name"],
+        )
+        return []
+
+    # Group by relative orbit to find available tracks
+    from collections import Counter
+    orbit_counts: Counter = Counter()
+    for g in results:
+        orbit = g.properties.get("pathNumber") or g.properties.get("relativeOrbit")
+        if orbit is not None:
+            orbit_counts[int(orbit)] += 1
+
+    log.info("Tracks found (%s): %s", s1["flight_direction"].upper(),
+             ", ".join(f"T{k}={v}" for k, v in sorted(orbit_counts.items(), key=lambda x: -x[1])))
+
+    # Pick the configured orbit if it has data, else the most-covered orbit
+    configured_orbit = s1.get("relative_orbit")
+    if configured_orbit and orbit_counts.get(configured_orbit, 0) > 0:
+        chosen_orbit = configured_orbit
+        log.info("Using configured relative orbit: %d (%d granules)", chosen_orbit, orbit_counts[chosen_orbit])
+    else:
+        chosen_orbit = orbit_counts.most_common(1)[0][0]
+        log.warning(
+            "Configured relative_orbit (%s) has no data. "
+            "Auto-selected orbit %d (%d granules). "
+            "Update relative_orbit in your config YAML to suppress this warning.",
+            configured_orbit, chosen_orbit, orbit_counts[chosen_orbit],
+        )
+
+    # Filter to the chosen orbit
+    filtered = [
+        g for g in results
+        if int(g.properties.get("pathNumber") or g.properties.get("relativeOrbit") or -1) == chosen_orbit
+    ]
+    log.info("Using %d granules from orbit %d.", len(filtered), chosen_orbit)
+    return filtered
 
 
 def build_pairs_sbas(granules: list, max_temporal_days: int = 48) -> list[tuple]:
@@ -73,14 +116,15 @@ def build_pairs_sbas(granules: list, max_temporal_days: int = 48) -> list[tuple]
 
     dated = sorted(
         [
-            (datetime.strptime(g.properties["startTime"][:10], "%Y-%m-%d"), g)
-            for g in granules
-        ]
+            (datetime.strptime(g.properties["startTime"][:10], "%Y-%m-%d"), i, g)
+            for i, g in enumerate(granules)
+        ],
+        key=lambda x: (x[0], x[1]),   # sort by date, then insertion order as tiebreaker
     )
 
     pairs = []
-    for i, (dt_i, g_i) in enumerate(dated):
-        for dt_j, g_j in dated[i + 1 :]:
+    for i, (dt_i, _, g_i) in enumerate(dated):
+        for dt_j, _, g_j in dated[i + 1 :]:
             delta = (dt_j - dt_i).days
             if delta > max_temporal_days:
                 break
@@ -91,29 +135,41 @@ def build_pairs_sbas(granules: list, max_temporal_days: int = 48) -> list[tuple]
 
 
 def submit_jobs(
-    hyp3: sdk.HyP3, pairs: list[tuple], cfg: dict, batch_size: int = 50
+    hyp3: sdk.HyP3, pairs: list[tuple], cfg: dict, batch_size: int = 200
 ) -> sdk.Batch:
-    """Submit INSAR_GAMMA jobs in batches and return the combined Batch."""
+    """Submit InSAR jobs in batches and return the combined Batch.
+
+    hyp3-sdk >= 7.0 API (GAMMA retired; use the generic ISCE-based processor):
+      - sdk.HyP3.prepare_insar_job(g1, g2, **opts)  → dict  (static method)
+      - hyp3.submit_prepared_jobs([dict, ...])        → Batch
+    """
     hyp3_cfg = cfg["hyp3"]
-    mint_cfg = cfg["mintpy"]
     max_pairs = min(len(pairs), hyp3_cfg.get("max_jobs", 200))
     pairs = pairs[:max_pairs]
 
-    log.info("Submitting %d jobs to HyP3 ...", len(pairs))
+    log.info("Preparing %d InSAR job definitions ...", len(pairs))
 
-    all_jobs: list[sdk.Job] = []
-    for i in range(0, len(pairs), batch_size):
-        chunk = pairs[i : i + batch_size]
-        batch = hyp3.submit_insar_gamma_job_collection(
-            granule_pairs=chunk,
+    prepared: list[dict] = []
+    for g1_name, g2_name in pairs:
+        job = sdk.HyP3.prepare_insar_job(
+            granule1=g1_name,
+            granule2=g2_name,
             looks=hyp3_cfg.get("looks", "10x2"),
             include_dem=hyp3_cfg.get("include_dem", True),
             include_inc_map=hyp3_cfg.get("include_inc_map", True),
             apply_water_mask=hyp3_cfg.get("apply_water_mask", True),
         )
+        prepared.append(job)
+
+    log.info("Submitting %d jobs to HyP3 (in batches of %d) ...", len(prepared), batch_size)
+
+    all_jobs: list[sdk.Job] = []
+    for i in range(0, len(prepared), batch_size):
+        chunk = prepared[i : i + batch_size]
+        batch = hyp3.submit_prepared_jobs(chunk)
         all_jobs.extend(batch.jobs)
-        log.info("  Submitted batch %d/%d", i // batch_size + 1, -(-len(pairs) // batch_size))
-        time.sleep(1)  # polite rate limiting
+        log.info("  Submitted batch %d/%d", i // batch_size + 1, -(-len(prepared) // batch_size))
+        time.sleep(1)
 
     return sdk.Batch(all_jobs)
 
