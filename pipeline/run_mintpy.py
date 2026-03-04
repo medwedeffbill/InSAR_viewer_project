@@ -38,12 +38,14 @@ def write_mintpy_config(cfg: dict, hyp3_dir: Path, work_dir: Path) -> Path:
     mint = cfg["mintpy"]
     hyp3 = cfg["hyp3"]
 
-    # HyP3 product glob patterns (unzipped structure)
-    unw_glob   = str(hyp3_dir / "S1*" / "*unw_phase.tif")
-    cor_glob   = str(hyp3_dir / "S1*" / "*corr.tif")
-    conn_glob  = str(hyp3_dir / "S1*" / "*conncomp.tif")
-    dem_glob   = str(hyp3_dir / "S1*" / "*dem.tif")
-    inc_glob   = str(hyp3_dir / "S1*" / "*inc_map.tif")
+    # HyP3 product glob patterns — must be absolute paths because MintPy
+    # runs with cwd=work_dir, so relative paths would resolve incorrectly.
+    # Note: HyP3 ISCE burst products do not include conncomp files.
+    base = hyp3_dir.resolve()
+    unw_glob  = str(base / "S1*" / "*unw_phase.tif")
+    cor_glob  = str(base / "S1*" / "*corr.tif")
+    dem_glob  = str(base / "S1*" / "*dem.tif")
+    inc_glob  = str(base / "S1*" / "*inc_map.tif")
 
     tropo = mint.get("tropospheric_correction", "no")
     tropo_method = tropo if tropo != "no" else "no"
@@ -53,7 +55,6 @@ def write_mintpy_config(cfg: dict, hyp3_dir: Path, work_dir: Path) -> Path:
         mintpy.load.processor        = hyp3
         mintpy.load.unwFile          = {unw_glob}
         mintpy.load.corFile          = {cor_glob}
-        mintpy.load.connCompFile     = {conn_glob}
         mintpy.load.demFile          = {dem_glob}
         mintpy.load.incAngleFile     = {inc_glob}
 
@@ -67,7 +68,9 @@ def write_mintpy_config(cfg: dict, hyp3_dir: Path, work_dir: Path) -> Path:
         mintpy.reference.lalo            = auto
 
         ##-----------------------------  Unwrapping Error  ---------------------------##
-        mintpy.unwrapError.method        = bridging
+        # HyP3 ISCE burst products do not include connected-components files,
+        # so bridging correction is not available — skip this step.
+        mintpy.unwrapError.method        = no
 
         ##-----------------------------  Phase Deramping  ----------------------------##
         mintpy.deramp                    = no
@@ -91,24 +94,65 @@ def write_mintpy_config(cfg: dict, hyp3_dir: Path, work_dir: Path) -> Path:
 
 
 def unzip_hyp3_products(hyp3_dir: Path) -> None:
-    """Unzip any zipped HyP3 products in-place."""
+    """Unzip any zipped HyP3 products in-place, deleting each ZIP after successful extraction.
+
+    Deleting as we go keeps peak disk usage to roughly (largest ZIP + extracted content)
+    rather than (all ZIPs + all extracted content), which is critical on space-constrained
+    machines.  ZIPs whose matching directory already exists are skipped and deleted immediately.
+    Corrupt ZIPs (e.g. from interrupted downloads) are logged and skipped rather than crashing.
+    """
+    import zipfile
+
     zips = list(hyp3_dir.glob("*.zip"))
     if not zips:
         log.info("No ZIP files found — assuming products are already extracted.")
         return
 
-    log.info("Extracting %d ZIP files ...", len(zips))
-    for zf in zips:
-        subprocess.run(
-            ["unzip", "-q", "-o", str(zf), "-d", str(hyp3_dir)],
-            check=True,
+    log.info("Extracting %d ZIP files (deleting each ZIP after extraction) ...", len(zips))
+    skipped: list[str] = []
+
+    for i, zf in enumerate(zips, start=1):
+        stem = zf.stem
+        dest_dir = hyp3_dir / stem
+        if dest_dir.exists():
+            log.info("  [%d/%d] %s — already extracted, removing ZIP", i, len(zips), stem)
+            zf.unlink()
+            continue
+
+        if not zipfile.is_zipfile(zf):
+            log.warning(
+                "  [%d/%d] %s.zip appears corrupt (incomplete download?) — skipping",
+                i, len(zips), stem,
+            )
+            skipped.append(stem)
+            continue
+
+        log.info("  [%d/%d] Extracting %s ...", i, len(zips), stem)
+        try:
+            subprocess.run(
+                ["unzip", "-q", "-o", str(zf), "-d", str(hyp3_dir)],
+                check=True,
+            )
+            zf.unlink()
+            log.info("  [%d/%d] Extracted and removed %s.zip", i, len(zips), stem)
+        except subprocess.CalledProcessError as exc:
+            log.warning(
+                "  [%d/%d] Failed to extract %s.zip (exit %d) — skipping",
+                i, len(zips), stem, exc.returncode,
+            )
+            skipped.append(stem)
+
+    if skipped:
+        log.warning(
+            "%d ZIP(s) were skipped due to corruption — MintPy will proceed without them:\n  %s",
+            len(skipped), "\n  ".join(skipped),
         )
     log.info("Extraction complete.")
 
 
 def run_smallbaseline(work_dir: Path, cfg_path: Path, steps: list[str] | None = None) -> None:
     """Execute MintPy's smallbaselineApp.py."""
-    cmd = ["smallbaselineApp.py", str(cfg_path)]
+    cmd = ["smallbaselineApp.py", str(cfg_path.resolve())]
     if steps:
         cmd += ["--dostep", ",".join(steps)]
 
