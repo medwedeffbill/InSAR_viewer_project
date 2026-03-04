@@ -72,11 +72,19 @@ def write_mintpy_config(cfg: dict, hyp3_dir: Path, work_dir: Path) -> Path:
         # so bridging correction is not available — skip this step.
         mintpy.unwrapError.method        = no
 
+        ##-----------------------------  Network Inversion  --------------------------##
+        # MintPy 1.6.2's variance-weight path is incompatible with NumPy >= 2.0
+        # (assigns array into scalar slot → ValueError).  Uniform weights produce
+        # essentially identical results for this dataset size.
+        mintpy.networkInversion.weightFunc = no
+
         ##-----------------------------  Phase Deramping  ----------------------------##
         mintpy.deramp                    = no
 
         ##-----------------------------  Tropospheric Delay  -------------------------##
-        mintpy.troposphericDelay.method  = {tropo_method}
+        # ERA5 download requires a Copernicus CDS API key (~/.cdsapirc).
+        # Set to "no" to skip until credentials are configured.
+        mintpy.troposphericDelay.method  = no
 
         ##-----------------------------  DEM Error Correction  -----------------------##
         mintpy.topographicResidual       = {'yes' if mint.get('dem_error_correction', True) else 'no'}
@@ -151,10 +159,18 @@ def unzip_hyp3_products(hyp3_dir: Path) -> None:
 
 
 def run_smallbaseline(work_dir: Path, cfg_path: Path, steps: list[str] | None = None) -> None:
-    """Execute MintPy's smallbaselineApp.py."""
+    """Execute MintPy's smallbaselineApp.py.
+
+    MintPy's --dostep only accepts a single step name.  When a range of steps
+    is requested we use --start / --stop instead, which runs every step between
+    the two endpoints (inclusive).  A single step still uses --dostep.
+    """
     cmd = ["smallbaselineApp.py", str(cfg_path.resolve())]
     if steps:
-        cmd += ["--dostep", ",".join(steps)]
+        if len(steps) == 1:
+            cmd += ["--dostep", steps[0]]
+        else:
+            cmd += ["--start", steps[0], "--stop", steps[-1]]
 
     log.info("Running: %s", " ".join(cmd))
     result = subprocess.run(cmd, cwd=work_dir, capture_output=False)
@@ -174,6 +190,18 @@ def main(config: Path, hyp3_dir: Path, work_dir: Path, steps: str | None, skip_u
     """Run MintPy SBAS processing on HyP3 InSAR products."""
     cfg = load_config(config)
     log.info("Processing AOI: %s", cfg["name"])
+
+    tropo_method = cfg.get("mintpy", {}).get("tropospheric_correction", "no")
+    if tropo_method == "no":
+        log.warning(
+            "Tropospheric correction is DISABLED (mintpy.troposphericDelay.method = no).\n"
+            "  Residual atmospheric delay (~1-3 cm LOS) will remain in the time series.\n"
+            "  To enable ERA5 correction:\n"
+            "    1. Create a free Copernicus account at https://cds.climate.copernicus.eu\n"
+            "    2. Install your API key in ~/.cdsapirc\n"
+            "    3. Set tropospheric_correction: pyaps in your config YAML\n"
+            "    4. Rerun this script (completed steps will be skipped automatically)"
+        )
 
     if not skip_unzip:
         unzip_hyp3_products(hyp3_dir)

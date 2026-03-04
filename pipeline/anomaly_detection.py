@@ -3,17 +3,25 @@ ML-based anomaly detection for InSAR displacement time series.
 
 Pipeline
 --------
-  1. Load MintPy timeseries.h5  →  (N_pixels × T_timesteps)
-  2. STL decompose each pixel   →  trend + seasonal + residual
-  3. Extract per-pixel features →  residual_variance, trend_magnitude,
-                                    seasonal_amplitude, change_point_score,
-                                    trend_acceleration
-  4. Score with Isolation Forest →  anomaly_score ∈ [0, 1]
-  5. Detect change points        →  ruptures PELT algorithm per pixel
-  6. Rule-based "why flagged?"   →  human-readable label strings
-  7. Save:
+  1. Load MintPy timeseries_demErr.h5  →  (T × rows × cols)
+  2. Vectorised feature extraction across ALL valid pixels at once:
+       - linear trend rate  (mm/yr)
+       - residual variance  (mm²)
+       - seasonal amplitude via sin+cos fit (mm peak-to-peak)
+       - trend acceleration (2nd-order fit curvature, mm/yr²)
+       - change-point score (variance-reduction metric, no per-pixel loop)
+  3. Score with Isolation Forest →  anomaly_score ∈ [0, 1]
+  4. Rule-based "why flagged?"   →  human-readable label strings
+  5. Save:
        anomaly_score.npy  — (rows × cols) float32
        labels.json        — sparse dict keyed "row_col" → {score, labels, cp_date}
+
+Note on STL
+-----------
+  With only ~15 observations over 6 months the STL period assumption (~12 obs/
+  season) is not statistically reliable: fewer than two full seasons are present.
+  We therefore replace per-pixel STL with fully vectorised polynomial and
+  trigonometric fits, which run in seconds rather than hours on millions of pixels.
 
 Usage
 -----
@@ -37,204 +45,194 @@ import numpy as np
 import yaml
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
-from statsmodels.tsa.seasonal import STL
-from tqdm import tqdm
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Data structures
-# ──────────────────────────────────────────────────────────────────────────────
-
-@dataclass
-class PixelFeatures:
-    residual_variance: float = 0.0
-    trend_magnitude: float = 0.0        # |mm/yr|
-    seasonal_amplitude: float = 0.0     # peak-to-peak mm
-    trend_acceleration: float = 0.0     # second derivative of trend
-    cp_score: float = 0.0               # ruptures normalised cost reduction
-    cp_date_idx: Optional[int] = None   # timestep index of change point
-
-
-@dataclass
-class PixelResult:
-    row: int
-    col: int
-    anomaly_score: float
-    labels: list[str] = field(default_factory=list)
-    change_point_date: Optional[str] = None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Loading
 # ──────────────────────────────────────────────────────────────────────────────
 
-def load_timeseries(mintpy_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple]:
+def load_timeseries(mintpy_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple, str]:
     """
     Load MintPy outputs.
 
     Returns
     -------
     ts        : (T, rows, cols) float32  displacement in mm
-    dates     : (T,)             str     'YYYYMMDD'
-    coh       : (rows, cols)     float32 mean temporal coherence
-    transform : (6,)             float64 GDAL-style geotransform
+    dates     : (T,)            str      'YYYYMMDD'
+    coh       : (rows, cols)    float32  temporal coherence
+    transform : (6,)            float    GDAL-style geotransform (native CRS units)
+    crs       : str             e.g. "EPSG:32610"
     """
-    ts_file = mintpy_dir / "timeseries.h5"
-    vel_file = mintpy_dir / "velocity.h5"
+    ts_file  = mintpy_dir / "timeseries_demErr.h5"   # DEM-error corrected
     coh_file = mintpy_dir / "temporalCoherence.h5"
 
-    for f in [ts_file, vel_file, coh_file]:
+    for f in [ts_file, coh_file]:
         if not f.exists():
             raise FileNotFoundError(f"Expected MintPy output not found: {f}")
 
     with h5py.File(ts_file, "r") as hf:
-        ts     = hf["timeseries"][:]            # (T, rows, cols), metres
-        ts     = ts * 1000.0                    # → mm
-        dates  = [d.decode() for d in hf["date"][:]]
-
-        # Extract geotransform from MintPy attributes
+        ts    = hf["timeseries"][:] * 1000.0         # metres → mm
+        dates = [d.decode() for d in hf["date"][:]]
         attrs = dict(hf.attrs)
-        x0 = float(attrs.get("X_FIRST", 0))
-        y0 = float(attrs.get("Y_FIRST", 0))
-        dx = float(attrs.get("X_STEP", 0.0001))
-        dy = float(attrs.get("Y_STEP", -0.0001))
+        x0   = float(attrs.get("X_FIRST", 0))
+        y0   = float(attrs.get("Y_FIRST", 0))
+        dx   = float(attrs.get("X_STEP",  0.0001))
+        dy   = float(attrs.get("Y_STEP", -0.0001))
+        epsg = int(attrs.get("EPSG", 4326))
         transform = (x0, dx, 0.0, y0, 0.0, dy)
+        crs = f"EPSG:{epsg}"
 
     with h5py.File(coh_file, "r") as hf:
         coh = hf["temporalCoherence"][:]
 
-    log.info("Loaded time series: shape=%s, T=%d dates, coherence shape=%s", ts.shape, len(dates), coh.shape)
-    return ts.astype(np.float32), np.array(dates), coh.astype(np.float32), transform
+    log.info(
+        "Loaded time series: shape=%s, T=%d dates, CRS=%s",
+        ts.shape, len(dates), crs,
+    )
+    return ts.astype(np.float32), np.array(dates), coh.astype(np.float32), transform, crs
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STL decomposition
+# Vectorised feature extraction
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _stl_decompose(series: np.ndarray, period: int = 12) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Decompose a 1-D time series via STL.
-    period=12 assumes ~monthly cadence (6-day repeat → ~12 obs/season).
-    Returns trend, seasonal, residual arrays of same length.
-    """
-    try:
-        stl = STL(series, period=period, robust=True)
-        res = stl.fit()
-        return res.trend, res.seasonal, res.resid
-    except Exception:
-        # Fall back to simple linear trend if STL fails (e.g. too few points)
-        t = np.arange(len(series), dtype=float)
-        slope, intercept = np.polyfit(t, series, 1)
-        trend = slope * t + intercept
-        return trend, np.zeros_like(series), series - trend
+def _decimal_years(dates: list[str]) -> np.ndarray:
+    """Convert YYYYMMDD strings to decimal years from the first date."""
+    from datetime import datetime
+    t0 = datetime.strptime(dates[0], "%Y%m%d")
+    return np.array(
+        [(datetime.strptime(d, "%Y%m%d") - t0).days / 365.25 for d in dates],
+        dtype=np.float64,
+    )
 
 
-def extract_features(series: np.ndarray, dates: np.ndarray, period: int = 12) -> PixelFeatures:
-    """Extract anomaly-relevant features from one pixel's time series."""
-    import ruptures as rpt
-
-    feat = PixelFeatures()
-
-    if np.all(series == 0) or np.isnan(series).all():
-        return feat
-
-    # Fill isolated NaNs by linear interpolation
-    valid = ~np.isnan(series)
-    if valid.sum() < 6:
-        return feat
-    if not valid.all():
-        x = np.arange(len(series))
-        series = np.interp(x, x[valid], series[valid])
-
-    trend, seasonal, residual = _stl_decompose(series, period=period)
-
-    # Residual variance
-    feat.residual_variance = float(np.var(residual))
-
-    # Seasonal amplitude (peak-to-peak)
-    feat.seasonal_amplitude = float(np.ptp(seasonal))
-
-    # Trend magnitude: fit linear to trend component
-    t = np.arange(len(trend), dtype=float)
-    if len(t) > 2:
-        slope, _ = np.polyfit(t, trend, 1)
-        # Convert slope (mm/obs) → mm/yr assuming ~6-day cadence
-        obs_per_year = 365.0 / 6.0
-        feat.trend_magnitude = abs(float(slope) * obs_per_year)
-
-        # Trend acceleration: curvature of second-order fit
-        coeffs = np.polyfit(t, trend, 2)
-        feat.trend_acceleration = abs(float(coeffs[0]) * obs_per_year**2)
-
-    # Change point detection on the residual using PELT
-    try:
-        model = rpt.Pelt(model="rbf", min_size=4, jump=2).fit(residual.reshape(-1, 1))
-        bkps = model.predict(pen=3.0)  # penalty controls sensitivity
-
-        if len(bkps) > 1:  # at least one interior break
-            cp_idx = bkps[-2]  # last break before end
-            # Score = cost improvement normalised by series length
-            baseline_cost = float(np.var(residual) * len(residual))
-            before = residual[:cp_idx]
-            after  = residual[cp_idx:]
-            segmented_cost = float(np.var(before) * len(before) + np.var(after) * len(after))
-            if baseline_cost > 0:
-                feat.cp_score = max(0.0, 1.0 - segmented_cost / baseline_cost)
-            feat.cp_date_idx = cp_idx
-    except Exception:
-        pass
-
-    return feat
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Batch feature extraction
-# ──────────────────────────────────────────────────────────────────────────────
-
-def extract_all_features(
+def extract_features_vectorised(
     ts: np.ndarray,
-    dates: np.ndarray,
+    dates: list[str],
     coh: np.ndarray,
     min_coherence: float = 0.4,
-    period: int = 12,
-) -> tuple[np.ndarray, list[tuple[int, int]], list[PixelFeatures]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Extract features for all valid pixels.
+    Compute per-pixel features for all coherent pixels in a single batch.
+
+    All fitting is done via np.linalg.lstsq on a shared design matrix — no
+    Python loops over pixels.
+
+    Features (per coherent pixel)
+    ──────────────────────────────
+    0  trend_rate_abs     |mm/yr|     — magnitude of linear LOS velocity
+    1  residual_variance  mm²         — variance after removing linear trend
+    2  seasonal_amplitude mm          — peak-to-peak of annual sin+cos component
+    3  trend_acceleration mm/yr²      — curvature of quadratic fit
+    4  cp_score           [0,1]       — variance-reduction from best 2-segment split
 
     Returns
     -------
-    feature_matrix : (N_valid, 5)  float32
-    pixel_indices  : [(row, col), ...]  length N_valid
-    feature_list   : [PixelFeatures, ...]  length N_valid
+    features      : (N_valid, 5)  float32
+    pixel_rc      : (N_valid, 2)  int     row/col indices of valid pixels
+    trend_slopes  : (N_valid,)    float32 signed slope (mm/yr) for label direction
     """
     T, rows, cols = ts.shape
-    feature_names = ["residual_variance", "trend_magnitude", "seasonal_amplitude", "trend_acceleration", "cp_score"]
+    t_yr = _decimal_years(dates)                    # (T,)
+    omega = 2.0 * np.pi                             # 1 cycle / year
 
-    pixel_indices: list[tuple[int, int]] = []
-    feature_list: list[PixelFeatures] = []
+    # ── Build design matrix for joint fit: [linear, sin, cos, constant] ──────
+    A = np.column_stack([
+        t_yr,
+        np.sin(omega * t_yr),
+        np.cos(omega * t_yr),
+        np.ones(T),
+    ]).astype(np.float64)                            # (T, 4)
 
-    mask = coh >= min_coherence
-    valid_pixels = list(zip(*np.where(mask)))
-    log.info("Extracting features for %d coherent pixels (of %d total) ...", len(valid_pixels), rows * cols)
+    # ── Select valid (coherent) pixels ───────────────────────────────────────
+    mask = (coh >= min_coherence)
+    ri, ci = np.where(mask)
+    N = len(ri)
+    log.info("Processing %d coherent pixels (%.1f%% of scene) ...", N, 100 * N / (rows * cols))
 
-    for row, col in tqdm(valid_pixels, desc="Feature extraction", unit="px"):
-        series = ts[:, row, col].astype(float)
-        feat = extract_features(series, dates, period=period)
-        pixel_indices.append((int(row), int(col)))
-        feature_list.append(feat)
+    # ── Flatten valid pixels: (T, N) ─────────────────────────────────────────
+    ts_valid = ts[:, ri, ci].astype(np.float64)     # (T, N)
 
-    feature_matrix = np.array(
-        [
-            [f.residual_variance, f.trend_magnitude, f.seasonal_amplitude, f.trend_acceleration, f.cp_score]
-            for f in feature_list
-        ],
-        dtype=np.float32,
-    )
+    # ── Replace any NaN columns with linear interpolation ────────────────────
+    for j in range(N):
+        col = ts_valid[:, j]
+        nan_mask = np.isnan(col)
+        if nan_mask.all():
+            ts_valid[:, j] = 0.0
+        elif nan_mask.any():
+            x = np.arange(T)
+            ts_valid[:, j] = np.interp(x, x[~nan_mask], col[~nan_mask])
 
-    log.info("Feature matrix shape: %s", feature_matrix.shape)
-    return feature_matrix, pixel_indices, feature_list
+    # ── Batch least-squares: A @ coeffs ≈ ts_valid ───────────────────────────
+    # coeffs shape: (4, N)  → [slope, sin_coeff, cos_coeff, intercept]
+    log.info("Fitting linear+seasonal model to %d pixels ...", N)
+    coeffs, _, _, _ = np.linalg.lstsq(A, ts_valid, rcond=None)
+
+    slope      = coeffs[0]                           # mm/yr  (N,)
+    sin_c      = coeffs[1]                           # (N,)
+    cos_c      = coeffs[2]                           # (N,)
+
+    # ── Residuals after full model ────────────────────────────────────────────
+    ts_hat     = A @ coeffs                          # (T, N)
+    residuals  = ts_valid - ts_hat                   # (T, N)
+
+    # ── Feature 0: trend rate (absolute, mm/yr) ───────────────────────────────
+    trend_rate_abs = np.abs(slope).astype(np.float32)
+
+    # ── Feature 1: residual variance (mm²) ───────────────────────────────────
+    resid_var = np.var(residuals, axis=0).astype(np.float32)
+
+    # ── Feature 2: seasonal amplitude (peak-to-peak mm) ──────────────────────
+    # A*cos + B*sin → amplitude = 2*sqrt(A²+B²)
+    seasonal_amp = (2.0 * np.sqrt(sin_c**2 + cos_c**2)).astype(np.float32)
+
+    # ── Feature 3: trend acceleration (quadratic curvature, mm/yr²) ──────────
+    # Fit 2nd-order polynomial to the linear-trend component only
+    log.info("Fitting quadratic model for acceleration ...")
+    A2 = np.column_stack([t_yr**2, t_yr, np.ones(T)]).astype(np.float64)
+    ts_trend = (A[:, [0]] * coeffs[0:1, :] + A[:, [3]] * coeffs[3:4, :])  # linear trend
+    c2, _, _, _ = np.linalg.lstsq(A2, ts_trend, rcond=None)
+    accel = np.abs(c2[0]).astype(np.float32)          # 2nd-order coeff = acceleration/2!
+
+    # ── Feature 4: change-point score ────────────────────────────────────────
+    # For each pixel: find the split index that maximises variance reduction.
+    # Fully vectorised over split positions (inner loop is over time steps, not pixels).
+    log.info("Computing change-point scores ...")
+    T_min = 4
+    cp_scores = np.zeros(N, dtype=np.float32)
+    baseline_var = np.var(residuals, axis=0)          # (N,)
+
+    best_reduction = np.zeros(N, dtype=np.float64)
+    for t in range(T_min, T - T_min):
+        before = residuals[:t, :]                      # (t, N)
+        after  = residuals[t:, :]                      # (T-t, N)
+        seg_var = (
+            np.var(before, axis=0) * t +
+            np.var(after,  axis=0) * (T - t)
+        ) / T
+        reduction = baseline_var - seg_var             # positive → better split
+        best_reduction = np.maximum(best_reduction, reduction)
+
+    denom = np.where(baseline_var > 0, baseline_var, 1.0)
+    cp_scores = np.clip(best_reduction / denom, 0.0, 1.0).astype(np.float32)
+
+    # ── Stack features ────────────────────────────────────────────────────────
+    features = np.column_stack([
+        trend_rate_abs,
+        resid_var,
+        seasonal_amp,
+        accel,
+        cp_scores,
+    ]).astype(np.float32)
+
+    pixel_rc = np.column_stack([ri, ci])              # (N, 2) int
+
+    log.info("Feature matrix: shape=%s, range=[%.3f, %.3f]",
+             features.shape, features.min(), features.max())
+    return features, pixel_rc, slope.astype(np.float32)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -245,8 +243,8 @@ def compute_anomaly_scores(feature_matrix: np.ndarray, contamination: float = 0.
     """
     Fit Isolation Forest and return anomaly scores in [0, 1].
 
-    IsolationForest.score_samples returns negative values where more negative
-    = more anomalous. We remap to [0, 1] with 1 = most anomalous.
+    IsolationForest.score_samples returns negative values — more negative means
+    more anomalous.  We remap so 1 = most anomalous.
     """
     scaler = StandardScaler()
     X = scaler.fit_transform(feature_matrix)
@@ -260,14 +258,9 @@ def compute_anomaly_scores(feature_matrix: np.ndarray, contamination: float = 0.
     )
     clf.fit(X)
 
-    raw_scores = clf.score_samples(X)   # more negative → more anomalous
-    # Normalise to [0, 1]
-    lo, hi = raw_scores.min(), raw_scores.max()
-    if hi > lo:
-        scores = 1.0 - (raw_scores - lo) / (hi - lo)
-    else:
-        scores = np.zeros_like(raw_scores)
-
+    raw = clf.score_samples(X)
+    lo, hi = raw.min(), raw.max()
+    scores = 1.0 - (raw - lo) / (hi - lo) if hi > lo else np.zeros_like(raw)
     return scores.astype(np.float32)
 
 
@@ -275,120 +268,113 @@ def compute_anomaly_scores(feature_matrix: np.ndarray, contamination: float = 0.
 # Rule-based labelling
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _percentile_thresholds(feature_list: list[PixelFeatures], p: float = 90) -> dict:
-    """Compute distribution-based thresholds for each feature."""
+def _percentile_thresholds(features: np.ndarray, p: float = 90) -> dict:
+    """Distribution-based thresholds derived from the valid-pixel population."""
     return {
-        "residual_variance":   float(np.percentile([f.residual_variance   for f in feature_list], p)),
-        "trend_magnitude":     float(np.percentile([f.trend_magnitude     for f in feature_list], p)),
-        "seasonal_amplitude":  float(np.percentile([f.seasonal_amplitude  for f in feature_list], p)),
-        "trend_acceleration":  float(np.percentile([f.trend_acceleration  for f in feature_list], p)),
-        "cp_score":            0.25,   # absolute threshold for change-point significance
+        "trend_rate_abs":    float(np.percentile(features[:, 0], p)),
+        "resid_var":         float(np.percentile(features[:, 1], p)),
+        "seasonal_amp":      float(np.percentile(features[:, 2], p)),
+        "accel":             float(np.percentile(features[:, 3], p)),
+        "cp_score":          0.30,   # absolute threshold
     }
 
 
 def assign_labels(
-    feat: PixelFeatures,
+    feat_row: np.ndarray,
+    slope: float,
     thresholds: dict,
-    dates: np.ndarray,
 ) -> list[str]:
-    """Return a list of human-readable reason strings for a flagged pixel."""
+    """Return human-readable reason strings for a flagged pixel."""
     labels: list[str] = []
+    trend_rate, resid_var, seasonal_amp, accel, cp_score = feat_row.tolist()
 
-    if feat.residual_variance > thresholds["residual_variance"]:
+    if resid_var > thresholds["resid_var"]:
         labels.append("High residual variance — signal not explained by trend or seasonality")
 
-    if feat.trend_magnitude > thresholds["trend_magnitude"]:
-        direction = "subsidence" if feat.trend_magnitude < 0 else "uplift/inflation"
-        labels.append(f"Rapid {direction} ({feat.trend_magnitude:.1f} mm/yr LOS rate)")
+    if trend_rate > thresholds["trend_rate_abs"]:
+        direction = "subsidence (away from satellite)" if slope < 0 else "uplift / toward-satellite motion"
+        labels.append(f"Rapid {direction} ({trend_rate:.1f} mm/yr LOS rate)")
 
-    if feat.seasonal_amplitude > thresholds["seasonal_amplitude"]:
-        labels.append(f"Strong seasonal signal ({feat.seasonal_amplitude:.1f} mm peak-to-peak)")
+    if seasonal_amp > thresholds["seasonal_amp"]:
+        labels.append(f"Strong seasonal signal ({seasonal_amp:.1f} mm peak-to-peak)")
 
-    if feat.cp_score > thresholds["cp_score"] and feat.cp_date_idx is not None:
-        if feat.cp_date_idx < len(dates):
-            raw = dates[feat.cp_date_idx]
-            date_str = f"{raw[:4]}-{raw[4:6]}-{raw[6:]}" if len(raw) == 8 else raw
-            labels.append(f"Change point detected near {date_str}")
-
-    if feat.trend_acceleration > thresholds["trend_acceleration"]:
+    if accel > thresholds["accel"]:
         labels.append("Accelerating deformation rate")
+
+    if cp_score > thresholds["cp_score"]:
+        labels.append("Abrupt change point in displacement time series")
 
     return labels
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Output
+# Output assembly
 # ──────────────────────────────────────────────────────────────────────────────
 
-def build_output_arrays(
+def build_outputs(
     ts_shape: tuple,
-    pixel_indices: list[tuple[int, int]],
+    pixel_rc: np.ndarray,
     scores: np.ndarray,
-    feature_list: list[PixelFeatures],
-    dates: np.ndarray,
+    features: np.ndarray,
+    slopes: np.ndarray,
     anomaly_threshold: float = 0.65,
 ) -> tuple[np.ndarray, dict]:
     """
     Build:
-      score_raster : (rows, cols) float32,  NaN where no coherent data
-      label_dict   : {row_col: {score, labels, change_point_date}}
+      score_raster : (rows, cols) float32, NaN where no coherent data
+      label_dict   : {row_col: {score, labels}}  for pixels above threshold
     """
     T, rows, cols = ts_shape
     score_raster = np.full((rows, cols), np.nan, dtype=np.float32)
 
-    thresholds = _percentile_thresholds(feature_list)
+    thresholds = _percentile_thresholds(features)
+
+    # Fill raster
+    score_raster[pixel_rc[:, 0], pixel_rc[:, 1]] = scores
+
+    # Build label dict for anomalous pixels only
+    flagged_mask = scores >= anomaly_threshold
+    log.info("Flagged %d pixels (score ≥ %.2f).", flagged_mask.sum(), anomaly_threshold)
 
     label_dict: dict = {}
+    for i in np.where(flagged_mask)[0]:
+        r, c = int(pixel_rc[i, 0]), int(pixel_rc[i, 1])
+        lbls = assign_labels(features[i], float(slopes[i]), thresholds)
+        label_dict[f"{r}_{c}"] = {
+            "score":  round(float(scores[i]), 4),
+            "labels": lbls,
+        }
 
-    for i, (row, col) in enumerate(pixel_indices):
-        score = float(scores[i])
-        score_raster[row, col] = score
-
-        if score >= anomaly_threshold:
-            feat = feature_list[i]
-            labels = assign_labels(feat, thresholds, dates)
-
-            cp_date = None
-            if feat.cp_date_idx is not None and feat.cp_date_idx < len(dates):
-                raw = dates[feat.cp_date_idx]
-                cp_date = f"{raw[:4]}-{raw[4:6]}-{raw[6:]}" if len(raw) == 8 else raw
-
-            label_dict[f"{row}_{col}"] = {
-                "score": round(score, 4),
-                "labels": labels,
-                "change_point_date": cp_date,
-            }
-
-    log.info("Flagged %d pixels (score ≥ %.2f).", len(label_dict), anomaly_threshold)
     return score_raster, label_dict
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Save
+# ──────────────────────────────────────────────────────────────────────────────
 
 def save_outputs(
     output_dir: Path,
     score_raster: np.ndarray,
     label_dict: dict,
     ts: np.ndarray,
-    dates: np.ndarray,
+    dates: list[str],
     transform: tuple,
-    coh: np.ndarray,
+    crs: str,
 ) -> None:
-    """Save all outputs to disk for use by export_cogs.py."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
     np.save(output_dir / "anomaly_score.npy", score_raster)
     log.info("Saved anomaly_score.npy  shape=%s", score_raster.shape)
 
-    labels_path = output_dir / "labels.json"
-    with open(labels_path, "w") as f:
+    with open(output_dir / "labels.json", "w") as f:
         json.dump(label_dict, f, indent=2)
     log.info("Saved labels.json  (%d anomalous pixels)", len(label_dict))
 
-    # Save geotransform and date info for downstream scripts
     meta = {
         "transform": list(transform),
-        "shape": {"T": int(ts.shape[0]), "rows": int(ts.shape[1]), "cols": int(ts.shape[2])},
-        "dates": list(dates),
-        "crs": "EPSG:4326",
+        "shape":     {"T": int(ts.shape[0]), "rows": int(ts.shape[1]), "cols": int(ts.shape[2])},
+        "dates":     list(dates),
+        "crs":       crs,
     }
     with open(output_dir / "meta.json", "w") as f:
         json.dump(meta, f, indent=2)
@@ -400,47 +386,44 @@ def save_outputs(
 # ──────────────────────────────────────────────────────────────────────────────
 
 @click.command()
-@click.option("--mintpy-dir",  required=True, type=click.Path(exists=True, path_type=Path))
-@click.option("--output-dir",  required=True, type=click.Path(path_type=Path))
-@click.option("--config",      required=True, type=click.Path(exists=True, path_type=Path))
-@click.option("--contamination", default=0.05, show_default=True, help="Expected fraction of anomalous pixels (IsolationForest)")
-@click.option("--anomaly-threshold", default=0.65, show_default=True, help="Score cutoff for label assignment")
-@click.option("--period", default=12, show_default=True, help="STL seasonal period in observations (~12 for 6-day repeat Sentinel-1)")
+@click.option("--mintpy-dir",        required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("--output-dir",        required=True, type=click.Path(path_type=Path))
+@click.option("--config",            required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("--contamination",     default=0.05,  show_default=True,
+              help="Expected fraction of anomalous pixels (IsolationForest)")
+@click.option("--anomaly-threshold", default=0.65,  show_default=True,
+              help="Score cutoff for label assignment")
 def main(
     mintpy_dir: Path,
     output_dir: Path,
     config: Path,
     contamination: float,
     anomaly_threshold: float,
-    period: int,
 ) -> None:
-    """Run ML anomaly detection on MintPy time series outputs."""
-    cfg = load_config(config)
+    """Run vectorised ML anomaly detection on MintPy time series outputs."""
+    with open(config) as fh:
+        cfg = yaml.safe_load(fh)
     min_coh = cfg["mintpy"].get("min_coherence", 0.4)
 
-    ts, dates, coh, transform = load_timeseries(mintpy_dir)
-    feature_matrix, pixel_indices, feature_list = extract_all_features(
-        ts, dates, coh, min_coherence=min_coh, period=period
+    ts, dates, coh, transform, crs = load_timeseries(mintpy_dir)
+
+    features, pixel_rc, slopes = extract_features_vectorised(
+        ts, list(dates), coh, min_coherence=min_coh,
     )
 
-    if len(pixel_indices) == 0:
-        log.error("No coherent pixels found. Check your coherence threshold.")
+    if len(pixel_rc) == 0:
+        log.error("No coherent pixels found — check your coherence threshold.")
         return
 
-    log.info("Scoring anomalies with Isolation Forest ...")
-    scores = compute_anomaly_scores(feature_matrix, contamination=contamination)
+    log.info("Scoring anomalies with Isolation Forest (%d trees, n_jobs=-1) ...", 200)
+    scores = compute_anomaly_scores(features, contamination=contamination)
 
-    score_raster, label_dict = build_output_arrays(
-        ts.shape, pixel_indices, scores, feature_list, dates, anomaly_threshold
+    score_raster, label_dict = build_outputs(
+        ts.shape, pixel_rc, scores, features, slopes, anomaly_threshold,
     )
 
-    save_outputs(output_dir, score_raster, label_dict, ts, dates, transform, coh)
-    log.info("Anomaly detection complete. Results in %s", output_dir)
-
-
-def load_config(config_path: Path) -> dict:
-    with open(config_path) as f:
-        return yaml.safe_load(f)
+    save_outputs(output_dir, score_raster, label_dict, ts, list(dates), transform, crs)
+    log.info("Anomaly detection complete → %s", output_dir)
 
 
 if __name__ == "__main__":
