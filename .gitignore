@@ -60,6 +60,10 @@ ipython_config.py
 *.kml
 *.kmz
 
+# Pipeline generated outputs
+pipeline/tiles/
+pipeline/test_zarr/
+
 # MintPy / ISCE / SNAP outputs
 mintpy/
 isce/

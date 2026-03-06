@@ -48,7 +48,7 @@ export default function MapView({ className = '' }: Props) {
       style:     BASEMAP_STYLE,
       center:    [viewport.longitude, viewport.latitude],
       zoom:      viewport.zoom,
-      attributionControl: true,
+      attributionControl: {},
     })
 
     map.current.addControl(new maplibregl.NavigationControl(), 'top-right')
@@ -102,8 +102,7 @@ export default function MapView({ className = '' }: Props) {
           // Build a clean template string
           .replace(/\/\d+\/\d+\/\d+\.png$/, '/{z}/{x}/{y}.png')
 
-        const cleanUrl = `${import.meta.env.VITE_R2_BASE_URL ?? ''}/${activeAOI.id}/tiles/${dir}/{z}/{x}/{y}.png`
-        ;(m.getSource(srcId) as maplibregl.RasterTileSource).setTiles([cleanUrl])
+        ;(m.getSource(srcId) as maplibregl.RasterTileSource).setTiles([tileTemplate])
       } else {
         ;(m.getSource(srcId) as maplibregl.RasterTileSource).setTiles([])
       }
