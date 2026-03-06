@@ -38,7 +38,8 @@ from botocore.config import Config
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-load_dotenv()
+# Load .env from the pipeline directory (where this script lives), not from CWD.
+load_dotenv(Path(__file__).resolve().parent / ".env")
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -56,7 +57,13 @@ MIME_MAP = {
 
 
 def get_s3_client():
-    account_id = os.environ["R2_ACCOUNT_ID"]
+    account_id = os.environ.get("R2_ACCOUNT_ID", "").strip()
+    if not account_id or "your_" in account_id.lower() or "example" in account_id.lower():
+        raise ValueError(
+            "R2_ACCOUNT_ID is missing or still a placeholder. "
+            "Edit .env and set R2_ACCOUNT_ID to your Cloudflare account ID "
+            "(find it in the Cloudflare dashboard URL or R2 overview page)."
+        )
     return boto3.client(
         "s3",
         endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",

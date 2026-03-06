@@ -10,6 +10,9 @@ conda env create -f environment.yml
 conda activate insar-pipeline
 ```
 
+All steps below assume this environment is active. If you open a new terminal, run
+`conda activate insar-pipeline` again before running pipeline scripts.
+
 ## Step 1 — Download from HyP3
 
 Requires a free [NASA Earthdata account](https://urs.earthdata.nasa.gov/) with
@@ -74,6 +77,8 @@ Outputs in `data/seattle/web/`:
 - `aoi_metadata.json`
 
 ## Step 5 — Generate map tiles
+
+Ensure `insar-pipeline` is activated (`conda activate insar-pipeline`). Then:
 
 ```bash
 python generate_tiles.py \

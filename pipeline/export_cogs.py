@@ -36,7 +36,7 @@ import yaml
 import zarr
 from pyproj import Transformer
 from rasterio.crs import CRS
-from rasterio.transform import Affine
+from rasterio.transform import Affine, array_bounds
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rio_cogeo.cogeo import cog_translate
 from rio_cogeo.profiles import cog_profiles
@@ -132,8 +132,10 @@ def write_cog(
             dst.write(arr, 1)
     else:
         # Compute the optimal WGS84 transform that preserves native resolution.
+        left, bottom, right, top = array_bounds(rows, cols, native_transform)
         dst_transform, dst_width, dst_height = calculate_default_transform(
-            native_crs, WGS84, cols, rows, transform=native_transform,
+            native_crs, WGS84, cols, rows,
+            left=left, bottom=bottom, right=right, top=top,
         )
 
         # Write source in native CRS to a temporary intermediate file.
@@ -283,17 +285,14 @@ def export_zarr_timeseries(
 
     T, rows, cols = ts.shape
 
-    store = zarr.DirectoryStore(str(zarr_path))
-    root  = zarr.group(store, overwrite=True)
-
-    root.create_dataset(
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.create_array(
         "displacement",
         data=ts,
         chunks=(T, min(32, rows), min(32, cols)),
-        dtype="float32",
-        compressor=zarr.Blosc(cname="zstd", clevel=5, shuffle=zarr.Blosc.BITSHUFFLE),
+        compressors=[zarr.codecs.Blosc(cname="zstd", clevel=5, shuffle=1)],
     )
-    root.create_dataset("dates", data=dates.astype("U8"), dtype=str)
+    root.create_array("dates", data=dates.astype("U8"))
 
     x0_utm = float(native_transform.c)
     dx_utm = float(native_transform.a)

@@ -19,13 +19,27 @@ Usage
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
+
+try:
+    from rio_tiler.io import COGReader
+    from rio_tiler.colormap import cmap as CMAPS
+except ModuleNotFoundError as e:
+    if "rio_tiler" in str(e):
+        print(
+            "Error: rio_tiler not found. Activate the pipeline environment first:\n"
+            "  conda activate insar-pipeline\n"
+            "Then run this script again.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    raise
 
 import click
 import numpy as np
 from PIL import Image
-from rio_tiler.io import COGReader
-from rio_tiler.colormap import cmap as CMAPS
+from rasterio.crs import CRS
 from tqdm import tqdm
 import mercantile
 
@@ -38,17 +52,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 LAYER_STYLES: dict[str, dict] = {
     "velocity_mm_yr": {
-        "colormap":  "rdbu_r",
+        "colormap":  "RdBu_r",   # matplotlib colormap names are case-sensitive
         "rescale":   (-30, 30),
         "nodata":    float("nan"),
     },
     "coherence_mean": {
-        "colormap":  "greys",
+        "colormap":  "Greys",
         "rescale":   (0, 1),
         "nodata":    float("nan"),
     },
     "anomaly_score": {
-        "colormap":  "ylorrd",
+        "colormap":  "YlOrRd",
         "rescale":   (0, 1),
         "nodata":    float("nan"),
     },
@@ -148,7 +162,8 @@ def main(
         log.info("Tiling layer: %s  zooms=%d–%d", layer_name, zoom_min, zoom_max)
 
         with COGReader(str(cog_path)) as reader:
-            bounds = reader.geographic_bounds   # (west, south, east, north)
+            # WGS84 (EPSG:4326) is the global lat/lon system; web tiles and mercantile expect bounds in degrees
+            bounds = reader.get_geographic_bounds(crs=CRS.from_epsg(4326))   # (west, south, east, north)
 
             total_tiles = sum(
                 len(get_tiles_for_zoom(bounds, z)) for z in range(zoom_min, zoom_max + 1)

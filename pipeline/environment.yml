@@ -30,5 +30,6 @@ dependencies:
     - asf-search>=6.0
     - rio-cogeo>=3.5
     - rio-tiler>=4.1
+    - mercantile>=1.2
     - ruptures>=1.1.7  # change-point detection
     - Pillow>=10.0
