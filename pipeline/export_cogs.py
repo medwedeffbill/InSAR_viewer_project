@@ -422,6 +422,7 @@ def write_aoi_metadata(
     shape: dict,
     transform: list[float],
     crs_native: str,
+    crs_proj4: str,
     tile_size: int = 32,
 ) -> None:
     """Write aoi_metadata.json consumed by the frontend on startup.
@@ -447,6 +448,7 @@ def write_aoi_metadata(
         "shape":       shape,
         "transform":   transform,
         "crs_native":  crs_native,
+        "crs_proj4":   crs_proj4,
         "tile_size":   tile_size,
         "layers": [
             {"id": "velocity",           "name": "LOS Velocity",       "unit": "mm/yr", "vmin": cfg["display"]["vmin"],  "vmax": cfg["display"]["vmax"],  "colorscale": cfg["display"]["colorscale"]},
@@ -515,11 +517,14 @@ def main(
         0.0,
         float(native_transform.e),   # dy
     ]
+    crs_native_str = f"EPSG:{native_crs.to_epsg()}"
+    crs_proj4_str = native_crs.to_proj4().replace("=True", "").strip()
     write_aoi_metadata(
         cfg, output_dir, wgs84_bbox, dates,
         shape={"T": T, "rows": rows, "cols": cols},
         transform=transform_list,
-        crs_native=f"EPSG:{native_crs.to_epsg()}",
+        crs_native=crs_native_str,
+        crs_proj4=crs_proj4_str,
         tile_size=tile_size,
     )
 

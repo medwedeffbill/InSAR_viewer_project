@@ -26,6 +26,8 @@ export interface AOI {
   transform?: number[]
   /** Native CRS e.g. EPSG:32610 (UTM) */
   crs_native?: string
+  /** PROJ4 string for native CRS (preferred for proj4 registration) */
+  crs_proj4?: string
   /** Tile size for ts_tiles (default 32) */
   tile_size?: number
 }

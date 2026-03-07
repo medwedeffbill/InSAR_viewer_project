@@ -14,6 +14,13 @@ import type { AOI, PixelTimeSeries } from '@/types'
 
 const R2_BASE = import.meta.env.VITE_R2_BASE_URL ?? 'https://your-r2-public-url'
 
+// Fallback PROJ4 strings for known EPSG codes (used when crs_proj4 not in metadata)
+const EPSG_PROJ4_FALLBACKS: Record<string, string> = {
+  'EPSG:32610': '+proj=utm +zone=10 +datum=WGS84 +units=m +no_defs',
+  'EPSG:32611': '+proj=utm +zone=11 +datum=WGS84 +units=m +no_defs',
+  'EPSG:4326': '+proj=longlat +datum=WGS84 +no_defs',
+}
+
 // ── URL builders ─────────────────────────────────────────────────────────────
 
 export function aoiListUrl(): string {
@@ -55,22 +62,73 @@ export function latLngToPixel(lat: number, lng: number, meta: RasterMeta): [numb
 }
 
 /**
+ * Ensure the native CRS is registered with proj4.
+ * Uses crs_proj4 from metadata if present, otherwise fallback map for known EPSG codes.
+ */
+function ensureCrsRegistered(meta: { crs_native: string; crs_proj4?: string }): void {
+  const { crs_native, crs_proj4 } = meta
+  if (proj4.defs(crs_native)) return // already registered
+
+  if (crs_proj4) {
+    proj4.defs(crs_native, crs_proj4)
+    return
+  }
+
+  const fallback = EPSG_PROJ4_FALLBACKS[crs_native]
+  if (fallback) {
+    proj4.defs(crs_native, fallback)
+    return
+  }
+
+  throw new Error(
+    `CRS "${crs_native}" is not registered. Provide crs_proj4 in aoi_metadata.json or add to EPSG_PROJ4_FALLBACKS.`,
+  )
+}
+
+/**
  * Convert lat/lng to raster row/col when the raster uses a projected CRS (e.g. UTM).
  * Uses proj4 to transform from WGS84 to the native CRS before applying the affine.
  */
 export function latLngToPixelNative(
   lat: number,
   lng: number,
-  meta: RasterMeta & { crs_native: string },
+  meta: RasterMeta & { crs_native: string; crs_proj4?: string },
 ): [number, number] {
+  const { crs_native, crs_proj4 } = meta
   const [x0, dx, , y0, , dy] = meta.transform
-  const [x, y] = proj4('EPSG:4326', meta.crs_native, [lng, lat])
+
+  ensureCrsRegistered(meta)
+
+  let x: number
+  let y: number
+  try {
+    ;[x, y] = proj4('EPSG:4326', crs_native, [lng, lat])
+  } catch (err) {
+    console.error('[latLngToPixelNative] proj4 transform failed:', {
+      crs_native,
+      crs_proj4: crs_proj4 ?? '(not in metadata)',
+      input: { lng, lat },
+      error: err,
+    })
+    throw err
+  }
+
   const col = Math.round((x - x0) / dx)
   const row = Math.round((y - y0) / dy)
-  return [
-    Math.max(0, Math.min(row, meta.shape.rows - 1)),
-    Math.max(0, Math.min(col, meta.shape.cols - 1)),
-  ]
+  const clampedRow = Math.max(0, Math.min(row, meta.shape.rows - 1))
+  const clampedCol = Math.max(0, Math.min(col, meta.shape.cols - 1))
+
+  console.debug('[latLngToPixelNative]', {
+    crs_native,
+    crs_proj4: crs_proj4 ?? '(fallback)',
+    input: { lng, lat },
+    output: { x, y },
+    row,
+    col,
+    clamped: { row: clampedRow, col: clampedCol },
+  })
+
+  return [clampedRow, clampedCol]
 }
 
 // ── Data fetchers ────────────────────────────────────────────────────────────
@@ -127,13 +185,29 @@ export async function fetchPixelTimeSeries(
   const localCol = col % TILE_SIZE
 
   const url = tsTileUrl(aoiId, tileRow, tileCol)
+  const logCtx = { aoiId, row, col, tileRow, tileCol, localRow, localCol, url }
+
   const res = await fetch(url)
-  if (!res.ok) return null
+  if (!res.ok) {
+    console.warn('[fetchPixelTimeSeries] HTTP error:', { ...logCtx, status: res.status, statusText: res.statusText })
+    return null
+  }
 
   const tile: TileJson = await res.json()
   const key = `${localRow}_${localCol}`
   const px = tile.pixels[key]
-  if (!px) return null
+
+  if (!px) {
+    const pixelKeys = Object.keys(tile.pixels ?? {}).slice(0, 5)
+    console.warn('[fetchPixelTimeSeries] pixel not in tile:', {
+      ...logCtx,
+      key,
+      pixelExists: false,
+      tilePixelCount: Object.keys(tile.pixels ?? {}).length,
+      sampleKeys: pixelKeys,
+    })
+    return null
+  }
 
   const displacement = px.d.map((v) => v ?? NaN)
 

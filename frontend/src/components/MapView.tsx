@@ -148,6 +148,15 @@ export default function MapView({ className = '' }: Props) {
 
       const { lng, lat } = e.lngLat
 
+      console.debug('[MapView] map clicked', {
+        lng,
+        lat,
+        aoiMetaLoaded: !!aoiMeta,
+        hasShape: !!aoiMeta?.shape,
+        hasTransform: !!aoiMeta?.transform,
+        hasCrsNative: !!aoiMeta?.crs_native,
+      })
+
       // Bounds check
       const [west, south, east, north] = activeAOI.bbox
       if (lng < west || lng > east || lat < south || lat > north) return
@@ -167,12 +176,18 @@ export default function MapView({ className = '' }: Props) {
           transform: aoiMeta.transform,
           shape: aoiMeta.shape,
           crs_native: aoiMeta.crs_native,
+          crs_proj4: aoiMeta.crs_proj4,
         })
         const ts = await fetchPixelTimeSeries(activeAOI.id, row, col, lat, lng)
+        if (ts === null) {
+          console.warn('[MapView] pixel lookup returned null — no time series for this pixel')
+        }
         setSelectedPixel(ts)
       } catch (err) {
-        console.error('Pixel fetch failed:', err)
+        console.error('[MapView] pixel fetch failed:', err)
         setSelectedPixel(null)
+      } finally {
+        setLoadingPixel(false)
       }
     },
     [activeAOI, aoiMeta, setLoadingPixel, setSelectedPixel],
