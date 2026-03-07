@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import type { AOI, ActiveLayer, LayerId, PixelTimeSeries, MapViewport } from '@/types'
 
+export type PixelStatus = 'idle' | 'loading' | 'success' | 'no-data' | 'error'
+
 interface AppState {
   // ── AOIs ──────────────────────────────────────────────────────────────────
   aois: AOI[]
@@ -16,8 +18,11 @@ interface AppState {
   // ── Selected pixel ────────────────────────────────────────────────────────
   selectedPixel: PixelTimeSeries | null
   isLoadingPixel: boolean
+  pixelStatus: PixelStatus
+  pixelMessage: string | undefined
   setSelectedPixel: (data: PixelTimeSeries | null) => void
   setLoadingPixel: (loading: boolean) => void
+  setPixelStatus: (status: PixelStatus, message?: string) => void
 
   // ── Map viewport ──────────────────────────────────────────────────────────
   viewport: MapViewport
@@ -38,7 +43,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setAOIs: (aois) => set({ aois }),
   selectAOI: (id) => {
     const aoi = get().aois.find((a) => a.id === id) ?? null
-    set({ selectedAOI: aoi, selectedPixel: null })
+    set({ selectedAOI: aoi, selectedPixel: null, pixelStatus: 'idle', pixelMessage: undefined })
   },
 
   // ── Layers ────────────────────────────────────────────────────────────────
@@ -55,8 +60,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   // ── Selected pixel ────────────────────────────────────────────────────────
   selectedPixel: null,
   isLoadingPixel: false,
-  setSelectedPixel: (data) => set({ selectedPixel: data, isLoadingPixel: false }),
+  pixelStatus: 'idle',
+  pixelMessage: undefined,
+  setSelectedPixel: (data) => set({ selectedPixel: data }),
   setLoadingPixel: (loading) => set({ isLoadingPixel: loading }),
+  setPixelStatus: (status, message) => set({ pixelStatus: status, pixelMessage: message }),
 
   // ── Map viewport ──────────────────────────────────────────────────────────
   viewport: { longitude: -122.25, latitude: 47.55, zoom: 5 },

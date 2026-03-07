@@ -5,9 +5,10 @@ import WhyFlaggedBadge from './WhyFlaggedBadge'
 import ExportButtons from './ExportButtons'
 
 export default function RightPanel() {
-  const selectedPixel  = useAppStore((s) => s.selectedPixel)
-  const isLoading      = useAppStore((s) => s.isLoadingPixel)
-  const selectedAOI    = useAppStore((s) => s.selectedAOI)
+  const selectedPixel    = useAppStore((s) => s.selectedPixel)
+  const pixelStatus      = useAppStore((s) => s.pixelStatus)
+  const pixelMessage     = useAppStore((s) => s.pixelMessage)
+  const selectedAOI     = useAppStore((s) => s.selectedAOI)
   const setSelectedPixel = useAppStore((s) => s.setSelectedPixel)
 
   const [showDecomp, setShowDecomp] = useState(false)
@@ -36,15 +37,33 @@ export default function RightPanel() {
 
       <div className="flex-1 overflow-y-auto px-4 py-4">
         {/* Loading state */}
-        {isLoading && (
+        {pixelStatus === 'loading' && (
           <div className="flex flex-col items-center justify-center h-40 gap-3">
             <div className="w-6 h-6 border-2 border-accent border-t-transparent rounded-full animate-spin" />
             <p className="text-xs text-muted">Loading time series…</p>
           </div>
         )}
 
-        {/* Empty state */}
-        {!isLoading && !selectedPixel && (
+        {/* No-data state */}
+        {pixelStatus === 'no-data' && !selectedPixel && (
+          <div className="flex flex-col items-center justify-center h-40 gap-2 text-center">
+            <div className="text-3xl opacity-30">◎</div>
+            <p className="text-sm text-amber-400">No time series found for that pixel</p>
+            {pixelMessage && <p className="text-xs text-muted">{pixelMessage}</p>}
+          </div>
+        )}
+
+        {/* Error state */}
+        {pixelStatus === 'error' && !selectedPixel && (
+          <div className="flex flex-col items-center justify-center h-40 gap-2 text-center">
+            <div className="text-3xl opacity-30">⚠</div>
+            <p className="text-sm text-red-400">Error loading pixel</p>
+            {pixelMessage && <p className="text-xs text-muted break-all px-2">{pixelMessage}</p>}
+          </div>
+        )}
+
+        {/* Idle empty state */}
+        {pixelStatus === 'idle' && !selectedPixel && (
           <div className="flex flex-col items-center justify-center h-40 gap-2 text-center">
             <div className="text-3xl opacity-30">◎</div>
             <p className="text-sm text-muted">Click any pixel within the AOI</p>
@@ -53,7 +72,7 @@ export default function RightPanel() {
         )}
 
         {/* Data */}
-        {!isLoading && selectedPixel && (
+        {selectedPixel && (
           <div className="space-y-5">
             {/* Anomaly badge (if flagged) */}
             {selectedPixel.anomaly && selectedPixel.anomaly.score >= 0.5 && (

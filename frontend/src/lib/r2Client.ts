@@ -168,9 +168,15 @@ interface TileJson {
 
 const TILE_SIZE = 32
 
+export type FetchPixelResult =
+  | { ok: true; data: PixelTimeSeries }
+  | { ok: false; kind: 'http-error'; status: number; url: string }
+  | { ok: false; kind: 'missing-pixel'; key: string; tileRow: number; tileCol: number }
+
 /**
  * Fetch the pixel time series for a given raster (row, col).
  * Finds the correct tile JSON and extracts the pixel within it.
+ * Returns structured result for UI feedback instead of silent null.
  */
 export async function fetchPixelTimeSeries(
   aoiId: string,
@@ -178,7 +184,7 @@ export async function fetchPixelTimeSeries(
   col: number,
   lat: number,
   lng: number,
-): Promise<PixelTimeSeries | null> {
+): Promise<FetchPixelResult> {
   const tileRow = Math.floor(row / TILE_SIZE)
   const tileCol = Math.floor(col / TILE_SIZE)
   const localRow = row % TILE_SIZE
@@ -190,7 +196,7 @@ export async function fetchPixelTimeSeries(
   const res = await fetch(url)
   if (!res.ok) {
     console.warn('[fetchPixelTimeSeries] HTTP error:', { ...logCtx, status: res.status, statusText: res.statusText })
-    return null
+    return { ok: false, kind: 'http-error', status: res.status, url }
   }
 
   const tile: TileJson = await res.json()
@@ -206,19 +212,22 @@ export async function fetchPixelTimeSeries(
       tilePixelCount: Object.keys(tile.pixels ?? {}).length,
       sampleKeys: pixelKeys,
     })
-    return null
+    return { ok: false, kind: 'missing-pixel', key, tileRow, tileCol }
   }
 
   const displacement = px.d.map((v) => v ?? NaN)
 
   return {
-    dates: tile.dates,
-    displacement,
-    trend: px.trend ?? [],
-    seasonal: px.seasonal ?? [],
-    residual: px.residual ?? [],
-    anomaly: px.anomaly ?? null,
-    lat,
-    lng,
+    ok: true,
+    data: {
+      dates: tile.dates,
+      displacement,
+      trend: px.trend ?? [],
+      seasonal: px.seasonal ?? [],
+      residual: px.residual ?? [],
+      anomaly: px.anomaly ?? null,
+      lat,
+      lng,
+    },
   }
 }

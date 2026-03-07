@@ -10,8 +10,10 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import maplibregl, { Map, MapMouseEvent } from 'maplibre-gl'
 import { useAppStore } from '@/store/useAppStore'
-import { tileUrl, fetchPixelTimeSeries, fetchAOIMeta, latLngToPixelNative } from '@/lib/r2Client'
+import { tileUrl, tsTileUrl, fetchPixelTimeSeries, fetchAOIMeta, latLngToPixelNative } from '@/lib/r2Client'
 import type { AOI, LayerId } from '@/types'
+
+const TILE_SIZE = 32
 
 const BASEMAP_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json'
 
@@ -39,6 +41,19 @@ export default function MapView({ className = '' }: Props) {
   const setViewport  = useAppStore((s) => s.setViewport)
   const setLoadingPixel   = useAppStore((s) => s.setLoadingPixel)
   const setSelectedPixel  = useAppStore((s) => s.setSelectedPixel)
+  const setPixelStatus    = useAppStore((s) => s.setPixelStatus)
+
+  // Map load sequencing: re-run tile/layer effects after style loads
+  const [mapReady, setMapReady] = useState(false)
+
+  // Debug badge state
+  const [debug, setDebug] = useState({
+    clickCount: 0,
+    lastRow: null as number | null,
+    lastCol: null as number | null,
+    lastTileUrl: null as string | null,
+    lastFetchResult: null as 'success' | 'no-data' | 'error' | null,
+  })
 
   // ── Initialise map ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -61,10 +76,11 @@ export default function MapView({ className = '' }: Props) {
       setViewport({ longitude: center.lng, latitude: center.lat, zoom: map.current.getZoom() })
     })
 
-    map.current.on('load', () => {
+    const applyStyleOnLoad = () => {
       if (!map.current) return
       // Add empty raster sources for each layer (URLs filled when AOI changes)
       LAYER_ORDER.forEach((layerId) => {
+        if (map.current!.getSource(`src-${layerId}`)) return
         map.current!.addSource(`src-${layerId}`, {
           type:    'raster',
           tiles:   [],
@@ -77,7 +93,9 @@ export default function MapView({ className = '' }: Props) {
           paint:  { 'raster-opacity': 0 },
         })
       })
-    })
+      setMapReady(true)
+    }
+    map.current.on('load', applyStyleOnLoad)
 
     return () => {
       map.current?.remove()
@@ -99,10 +117,10 @@ export default function MapView({ className = '' }: Props) {
       })
   }, [activeAOI?.id])
 
-  // ── Update tile sources when AOI changes ───────────────────────────────────
+  // ── Update tile sources when AOI changes (or map becomes ready) ─────────────
   useEffect(() => {
     const m = map.current
-    if (!m || !m.isStyleLoaded()) return
+    if (!m || !mapReady || !m.isStyleLoaded()) return
 
     LAYER_ORDER.forEach((layerId) => {
       const srcId = `src-${layerId}`
@@ -127,35 +145,28 @@ export default function MapView({ className = '' }: Props) {
       const [west, south, east, north] = activeAOI.bbox
       m.fitBounds([west, south, east, north], { padding: 60, duration: 1200 })
     }
-  }, [activeAOI])
+  }, [activeAOI, mapReady])
 
-  // ── Sync layer visibility / opacity ────────────────────────────────────────
+  // ── Sync layer visibility / opacity (after map style loads) ──────────────────
   useEffect(() => {
     const m = map.current
-    if (!m || !m.isStyleLoaded()) return
+    if (!m || !mapReady || !m.isStyleLoaded()) return
 
     activeLayers.forEach(({ id, visible, opacity }) => {
       const lyrId = `lyr-${id}`
       if (!m.getLayer(lyrId)) return
       m.setPaintProperty(lyrId, 'raster-opacity', visible ? opacity : 0)
     })
-  }, [activeLayers])
+  }, [activeLayers, mapReady])
 
   // ── Click handler → pixel lookup ───────────────────────────────────────────
   const handleClick = useCallback(
     async (e: MapMouseEvent) => {
+      console.log('[MapView] handleClick fired')
       if (!activeAOI) return
 
       const { lng, lat } = e.lngLat
-
-      console.debug('[MapView] map clicked', {
-        lng,
-        lat,
-        aoiMetaLoaded: !!aoiMeta,
-        hasShape: !!aoiMeta?.shape,
-        hasTransform: !!aoiMeta?.transform,
-        hasCrsNative: !!aoiMeta?.crs_native,
-      })
+      setDebug((d) => ({ ...d, clickCount: d.clickCount + 1 }))
 
       // Bounds check
       const [west, south, east, north] = activeAOI.bbox
@@ -164,12 +175,14 @@ export default function MapView({ className = '' }: Props) {
       // Need full metadata with shape, transform, crs_native for pixel lookup
       if (!aoiMeta?.shape || !aoiMeta?.transform || !aoiMeta?.crs_native) {
         console.warn('AOI metadata missing shape/transform/crs_native — pixel lookup unavailable')
+        setPixelStatus('error', 'AOI metadata not loaded yet')
         setSelectedPixel(null)
         return
       }
 
       setLoadingPixel(true)
       setSelectedPixel(null)
+      setPixelStatus('loading')
 
       try {
         const [row, col] = latLngToPixelNative(lat, lng, {
@@ -178,19 +191,38 @@ export default function MapView({ className = '' }: Props) {
           crs_native: aoiMeta.crs_native,
           crs_proj4: aoiMeta.crs_proj4,
         })
-        const ts = await fetchPixelTimeSeries(activeAOI.id, row, col, lat, lng)
-        if (ts === null) {
-          console.warn('[MapView] pixel lookup returned null — no time series for this pixel')
+        const tileRow = Math.floor(row / TILE_SIZE)
+        const tileCol = Math.floor(col / TILE_SIZE)
+        const tileUrlStr = tsTileUrl(activeAOI.id, tileRow, tileCol)
+        setDebug((d) => ({ ...d, lastRow: row, lastCol: col, lastTileUrl: tileUrlStr }))
+
+        const result = await fetchPixelTimeSeries(activeAOI.id, row, col, lat, lng)
+
+        if (result.ok) {
+          setSelectedPixel(result.data)
+          setPixelStatus('success')
+          setDebug((d) => ({ ...d, lastFetchResult: 'success' }))
+        } else {
+          setSelectedPixel(null)
+          if (result.kind === 'http-error') {
+            setPixelStatus('error', `HTTP ${result.status}: ${tileUrlStr}`)
+            setDebug((d) => ({ ...d, lastFetchResult: 'error' }))
+          } else {
+            setPixelStatus('no-data', `Pixel ${result.key} not in tile ${result.tileRow}_${result.tileCol}`)
+            setDebug((d) => ({ ...d, lastFetchResult: 'no-data' }))
+          }
         }
-        setSelectedPixel(ts)
       } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
         console.error('[MapView] pixel fetch failed:', err)
         setSelectedPixel(null)
+        setPixelStatus('error', msg)
+        setDebug((d) => ({ ...d, lastFetchResult: 'error' }))
       } finally {
         setLoadingPixel(false)
       }
     },
-    [activeAOI, aoiMeta, setLoadingPixel, setSelectedPixel],
+    [activeAOI, aoiMeta, setLoadingPixel, setSelectedPixel, setPixelStatus],
   )
 
   useEffect(() => {
@@ -210,10 +242,22 @@ export default function MapView({ className = '' }: Props) {
   }, [activeAOI])
 
   return (
-    <div
-      ref={mapContainer}
-      className={`w-full h-full ${className}`}
-      aria-label="InSAR deformation map"
-    />
+    <div className={`relative w-full h-full ${className}`}>
+      <div
+        ref={mapContainer}
+        className="absolute inset-0"
+        aria-label="InSAR deformation map"
+      />
+      {/* Temporary debug badge */}
+      <div className="absolute bottom-4 left-4 z-10 bg-black/80 text-[10px] font-mono text-green-400 px-2 py-1.5 rounded border border-green-800/50 max-w-[280px]">
+        <div>clicks: {debug.clickCount}</div>
+        <div>aoiMeta: {aoiMeta ? 'yes' : 'no'}</div>
+        <div>row/col: {debug.lastRow ?? '-'} / {debug.lastCol ?? '-'}</div>
+        <div className="truncate" title={debug.lastTileUrl ?? ''}>
+          tile: {debug.lastTileUrl ? debug.lastTileUrl.split('/').pop() : '-'}
+        </div>
+        <div>result: {debug.lastFetchResult ?? '-'}</div>
+      </div>
+    </div>
   )
 }
