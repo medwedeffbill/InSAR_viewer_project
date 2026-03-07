@@ -20,6 +20,14 @@ export interface AOI {
   case_study: string | null
   date_range: [string, string]
   layers: LayerInfo[]
+  /** Raster shape for pixel lookup (from aoi_metadata.json) */
+  shape?: { T: number; rows: number; cols: number }
+  /** Affine transform [x0, dx, 0, y0, 0, dy] in native CRS */
+  transform?: number[]
+  /** Native CRS e.g. EPSG:32610 (UTM) */
+  crs_native?: string
+  /** Tile size for ts_tiles (default 32) */
+  tile_size?: number
 }
 
 // ─── Active layer state ──────────────────────────────────────────────────────

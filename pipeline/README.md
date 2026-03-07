@@ -78,8 +78,6 @@ Outputs in `data/seattle/web/`:
 
 ## Step 5 — Generate map tiles
 
-Ensure `insar-pipeline` is activated (`conda activate insar-pipeline`). Then:
-
 ```bash
 python generate_tiles.py \
     --cog-dir    data/seattle/web \

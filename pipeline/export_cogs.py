@@ -413,11 +413,24 @@ def export_ts_tile_json(mintpy_dir: Path, ml_dir: Path, output_dir: Path, tile_s
 # AOI manifest
 # ──────────────────────────────────────────────────────────────────────────────
 
-def write_aoi_metadata(cfg: dict, output_dir: Path, wgs84_bbox: tuple, dates: list[str]) -> None:
+def write_aoi_metadata(
+    cfg: dict,
+    output_dir: Path,
+    wgs84_bbox: tuple,
+    dates: list[str],
+    *,
+    shape: dict,
+    transform: list[float],
+    crs_native: str,
+    tile_size: int = 32,
+) -> None:
     """Write aoi_metadata.json consumed by the frontend on startup.
 
     bbox and center are always in WGS84 (lon/lat) degrees regardless of the
     native CRS of the processed rasters.
+
+    shape, transform, crs_native, and tile_size enable pixel-level click lookup:
+    the frontend converts lat/lng → native coords → row/col for ts_tiles lookup.
     """
     west, south, east, north = wgs84_bbox
 
@@ -431,6 +444,10 @@ def write_aoi_metadata(cfg: dict, output_dir: Path, wgs84_bbox: tuple, dates: li
         "featured":    cfg.get("featured", False),
         "case_study":  cfg.get("case_study", None),
         "date_range":  [dates[0], dates[-1]] if dates else [],
+        "shape":       shape,
+        "transform":   transform,
+        "crs_native":  crs_native,
+        "tile_size":   tile_size,
         "layers": [
             {"id": "velocity",           "name": "LOS Velocity",       "unit": "mm/yr", "vmin": cfg["display"]["vmin"],  "vmax": cfg["display"]["vmax"],  "colorscale": cfg["display"]["colorscale"]},
             {"id": "coherence",          "name": "Mean Coherence",     "unit": "",      "vmin": 0,   "vmax": 1,   "colorscale": "Greys"},
@@ -487,7 +504,24 @@ def main(
     log.info("=== Writing AOI metadata ===")
     with h5py.File(mintpy_dir / "timeseries_demErr.h5", "r") as hf:
         dates = [d.decode() for d in hf["date"][:]]
-    write_aoi_metadata(cfg, output_dir, wgs84_bbox, dates)
+        ts = hf["timeseries"]
+        T, rows, cols = ts.shape
+
+    transform_list = [
+        float(native_transform.c),   # x0
+        float(native_transform.a),   # dx
+        0.0,
+        float(native_transform.f),   # y0
+        0.0,
+        float(native_transform.e),   # dy
+    ]
+    write_aoi_metadata(
+        cfg, output_dir, wgs84_bbox, dates,
+        shape={"T": T, "rows": rows, "cols": cols},
+        transform=transform_list,
+        crs_native=f"EPSG:{native_crs.to_epsg()}",
+        tile_size=tile_size,
+    )
 
     log.info("Export complete → %s", output_dir)
 

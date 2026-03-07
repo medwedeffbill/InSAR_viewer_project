@@ -9,6 +9,7 @@
  *   aois.json
  */
 
+import proj4 from 'proj4'
 import type { AOI, PixelTimeSeries } from '@/types'
 
 const R2_BASE = import.meta.env.VITE_R2_BASE_URL ?? 'https://your-r2-public-url'
@@ -42,10 +43,30 @@ interface RasterMeta {
   shape: { T: number; rows: number; cols: number }
 }
 
+/** For geographic CRS (e.g. WGS84) where transform is in lon/lat. */
 export function latLngToPixel(lat: number, lng: number, meta: RasterMeta): [number, number] {
   const [x0, dx, , y0, , dy] = meta.transform
   const col = Math.round((lng - x0) / dx)
   const row = Math.round((lat - y0) / dy)
+  return [
+    Math.max(0, Math.min(row, meta.shape.rows - 1)),
+    Math.max(0, Math.min(col, meta.shape.cols - 1)),
+  ]
+}
+
+/**
+ * Convert lat/lng to raster row/col when the raster uses a projected CRS (e.g. UTM).
+ * Uses proj4 to transform from WGS84 to the native CRS before applying the affine.
+ */
+export function latLngToPixelNative(
+  lat: number,
+  lng: number,
+  meta: RasterMeta & { crs_native: string },
+): [number, number] {
+  const [x0, dx, , y0, , dy] = meta.transform
+  const [x, y] = proj4('EPSG:4326', meta.crs_native, [lng, lat])
+  const col = Math.round((x - x0) / dx)
+  const row = Math.round((y - y0) / dy)
   return [
     Math.max(0, Math.min(row, meta.shape.rows - 1)),
     Math.max(0, Math.min(col, meta.shape.cols - 1)),

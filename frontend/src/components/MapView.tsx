@@ -7,11 +7,11 @@
  * Click handler converts map coordinates → raster pixel → fetches time series.
  */
 
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback, useState } from 'react'
 import maplibregl, { Map, MapMouseEvent } from 'maplibre-gl'
 import { useAppStore } from '@/store/useAppStore'
-import { tileUrl, fetchPixelTimeSeries, latLngToPixel } from '@/lib/r2Client'
-import type { LayerId } from '@/types'
+import { tileUrl, fetchPixelTimeSeries, fetchAOIMeta, latLngToPixelNative } from '@/lib/r2Client'
+import type { AOI, LayerId } from '@/types'
 
 const BASEMAP_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json'
 
@@ -33,6 +33,7 @@ export default function MapView({ className = '' }: Props) {
   const mapContainer = useRef<HTMLDivElement>(null)
   const map          = useRef<Map | null>(null)
   const activeAOI    = useAppStore((s) => s.selectedAOI)
+  const [aoiMeta, setAoiMeta] = useState<AOI | null>(null)
   const activeLayers = useAppStore((s) => s.activeLayers)
   const viewport     = useAppStore((s) => s.viewport)
   const setViewport  = useAppStore((s) => s.setViewport)
@@ -83,6 +84,20 @@ export default function MapView({ className = '' }: Props) {
       map.current = null
     }
   }, [])   // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Fetch full AOI metadata when AOI changes (needed for pixel lookup) ─────
+  useEffect(() => {
+    if (!activeAOI) {
+      setAoiMeta(null)
+      return
+    }
+    fetchAOIMeta(activeAOI.id)
+      .then(setAoiMeta)
+      .catch((err) => {
+        console.error('Failed to fetch AOI metadata:', err)
+        setAoiMeta(null)
+      })
+  }, [activeAOI?.id])
 
   // ── Update tile sources when AOI changes ───────────────────────────────────
   useEffect(() => {
@@ -137,22 +152,22 @@ export default function MapView({ className = '' }: Props) {
       const [west, south, east, north] = activeAOI.bbox
       if (lng < west || lng > east || lat < south || lat > north) return
 
+      // Need full metadata with shape, transform, crs_native for pixel lookup
+      if (!aoiMeta?.shape || !aoiMeta?.transform || !aoiMeta?.crs_native) {
+        console.warn('AOI metadata missing shape/transform/crs_native — pixel lookup unavailable')
+        setSelectedPixel(null)
+        return
+      }
+
       setLoadingPixel(true)
       setSelectedPixel(null)
 
       try {
-        // Derive raster pixel from lat/lng using the velocity COG geotransform
-        // We store the geotransform in aoi_metadata.json; for now approximate from bbox + shape
-        const shapeApprox = { T: 100, rows: 400, cols: 400 }  // will be overwritten by real meta
-        const transform = [
-          west,
-          (east - west) / shapeApprox.cols,
-          0,
-          north,
-          0,
-          -(north - south) / shapeApprox.rows,
-        ]
-        const [row, col] = latLngToPixel(lat, lng, { transform, shape: shapeApprox })
+        const [row, col] = latLngToPixelNative(lat, lng, {
+          transform: aoiMeta.transform,
+          shape: aoiMeta.shape,
+          crs_native: aoiMeta.crs_native,
+        })
         const ts = await fetchPixelTimeSeries(activeAOI.id, row, col, lat, lng)
         setSelectedPixel(ts)
       } catch (err) {
@@ -160,7 +175,7 @@ export default function MapView({ className = '' }: Props) {
         setSelectedPixel(null)
       }
     },
-    [activeAOI, setLoadingPixel, setSelectedPixel],
+    [activeAOI, aoiMeta, setLoadingPixel, setSelectedPixel],
   )
 
   useEffect(() => {

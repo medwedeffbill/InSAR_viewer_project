@@ -100,7 +100,7 @@ InSAR_viewer_project/
 
 ### Cloudflare R2 (data)
 
-1. Create a bucket named `insar-explorer` in the Cloudflare dashboard
+1. Create a bucket named `insar-cogs` in the Cloudflare dashboard
 2. Enable **Public Access** on the bucket
 3. Optionally add a custom domain (e.g. `data.yoursite.com`)
 4. Configure CORS (bucket Settings → CORS):
