@@ -181,8 +181,11 @@ export default function MapView({ className = '' }: Props) {
         : null
       )
 
-      // Bounds check
-      const [west, south, east, north] = activeAOI.bbox
+      // Bounds check — use aoiMeta.bbox (from aoi_metadata.json on R2) if available,
+      // falling back to activeAOI.bbox (from aois.json or DEMO stub).
+      const bboxSource = aoiMeta?.bbox ?? activeAOI.bbox
+      const [west, south, east, north] = bboxSource
+      console.log('[MapView] bounds check', { lng, lat, west, south, east, north, source: aoiMeta?.bbox ? 'aoiMeta' : 'activeAOI' })
       if (lng < west || lng > east || lat < south || lat > north) {
         console.log('[MapView] click outside AOI bounds, skipping')
         return
