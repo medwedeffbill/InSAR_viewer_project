@@ -3,18 +3,6 @@ import type { AOI } from '@/types'
 
 const FEATURED_AOIS: Pick<AOI, 'id' | 'name' | 'description' | 'case_study'>[] = [
   {
-    id: 'seattle',
-    name: 'Seattle / Puget Sound',
-    description: 'Urban land subsidence driven by groundwater extraction and sediment compaction beneath the Seattle metro area.',
-    case_study: 'seattle-subsidence',
-  },
-  {
-    id: 'mt_rainier',
-    name: 'Mt. Rainier, WA',
-    description: 'Monitoring subtle surface deformation at an active stratovolcano — hydrothermal activity and magmatic system dynamics.',
-    case_study: 'volcanic-inflation',
-  },
-  {
     id: 'portuguese_bend',
     name: 'Portuguese Bend Landslide, CA',
     description: 'One of the most active slow-moving landslides in the US, with LOS rates exceeding 100 mm/yr in the active lobe.',
@@ -80,13 +68,12 @@ export default function Landing() {
             Sentinel-1 · InSAR · ML Anomaly Detection
           </span>
           <h1 className="text-4xl md:text-5xl font-bold text-white leading-tight">
-            Is the ground doing something{' '}
-            <span className="text-accent-light">weird</span>?
+            Detecting slow moving landslides with{' '}
+            <span className="text-accent-light">radar imaging</span>
           </h1>
           <p className="text-lg text-slate-400 max-w-2xl mx-auto leading-relaxed">
-            Pick a place on Earth and explore millimeter-scale ground deformation from
-            Sentinel-1 radar satellites — with ML-powered anomaly detection to highlight
-            subsidence bowls, volcanic inflation, landslide creep, and co-seismic steps.
+            I built this web app to visualize ground displacement histories from InSAR data,
+            and showcase my work applying ML-powered anomaly detection to InSAR time histories.
           </p>
           <div className="flex gap-3 justify-center flex-wrap">
             <Link to="/explore" className="btn-primary text-base px-6 py-2.5">
@@ -104,7 +91,7 @@ export default function Landing() {
         {/* Featured AOI cards */}
         <section id="featured" className="mt-20">
           <h2 className="text-2xl font-bold text-white mb-6">Featured sites</h2>
-          <div className="grid md:grid-cols-3 gap-5">
+          <div className="grid md:grid-cols-1 max-w-md gap-5">
             {FEATURED_AOIS.map((aoi) => (
               <div key={aoi.id} className="panel p-5 flex flex-col gap-3 hover:border-accent/40 transition-colors group">
                 <div className="space-y-1">
