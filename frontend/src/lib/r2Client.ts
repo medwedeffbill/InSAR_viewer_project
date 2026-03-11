@@ -140,9 +140,18 @@ export async function fetchAOIList(): Promise<AOI[]> {
 }
 
 export async function fetchAOIMeta(aoiId: string): Promise<AOI> {
-  const res = await fetch(aoiMetaUrl(aoiId))
+  const url = aoiMetaUrl(aoiId)
+  const res = await fetch(url)
   if (!res.ok) throw new Error(`Failed to fetch AOI metadata for ${aoiId}: ${res.status}`)
-  return res.json()
+  const data: AOI = await res.json()
+  console.log(`[fetchAOIMeta] fetched ${url}:`, {
+    hasShape: !!data.shape,
+    hasCrsNative: !!data.crs_native,
+    hasCrsProj4: !!data.crs_proj4,
+    hasTileSize: !!data.tile_size,
+    keys: Object.keys(data),
+  })
+  return data
 }
 
 interface TileJsonPixel {

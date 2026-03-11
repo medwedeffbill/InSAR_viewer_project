@@ -109,8 +109,16 @@ export default function MapView({ className = '' }: Props) {
       setAoiMeta(null)
       return
     }
+    import('@/lib/r2Client').then(({ aoiMetaUrl }) => {
+      const url = aoiMetaUrl(activeAOI.id)
+      console.log('[MapView] fetching AOI meta from:', url)
+      console.log('[MapView] R2_BASE from env:', import.meta.env.VITE_R2_BASE_URL)
+    })
     fetchAOIMeta(activeAOI.id)
-      .then(setAoiMeta)
+      .then((meta) => {
+        console.log('[MapView] fetched aoiMeta:', JSON.stringify(meta, null, 2))
+        setAoiMeta(meta)
+      })
       .catch((err) => {
         console.error('Failed to fetch AOI metadata:', err)
         setAoiMeta(null)
@@ -168,13 +176,25 @@ export default function MapView({ className = '' }: Props) {
       const { lng, lat } = e.lngLat
       setDebug((d) => ({ ...d, clickCount: d.clickCount + 1 }))
 
+      console.log('[MapView] aoiMeta at click time:', aoiMeta
+        ? { shape: aoiMeta.shape, transform: aoiMeta.transform, crs_native: aoiMeta.crs_native, crs_proj4: aoiMeta.crs_proj4 }
+        : null
+      )
+
       // Bounds check
       const [west, south, east, north] = activeAOI.bbox
-      if (lng < west || lng > east || lat < south || lat > north) return
+      if (lng < west || lng > east || lat < south || lat > north) {
+        console.log('[MapView] click outside AOI bounds, skipping')
+        return
+      }
 
       // Need full metadata with shape, transform, crs_native for pixel lookup
       if (!aoiMeta?.shape || !aoiMeta?.transform || !aoiMeta?.crs_native) {
-        console.warn('AOI metadata missing shape/transform/crs_native — pixel lookup unavailable')
+        console.warn('[MapView] early return: AOI metadata missing', {
+          hasShape: !!aoiMeta?.shape,
+          hasTransform: !!aoiMeta?.transform,
+          hasCrsNative: !!aoiMeta?.crs_native,
+        })
         setPixelStatus('error', 'AOI metadata not loaded yet')
         setSelectedPixel(null)
         return
@@ -249,9 +269,15 @@ export default function MapView({ className = '' }: Props) {
         aria-label="InSAR deformation map"
       />
       {/* Temporary debug badge */}
-      <div className="absolute bottom-4 left-4 z-10 bg-black/80 text-[10px] font-mono text-green-400 px-2 py-1.5 rounded border border-green-800/50 max-w-[280px]">
+      <div className="absolute bottom-4 left-4 z-10 bg-black/80 text-[10px] font-mono text-green-400 px-2 py-1.5 rounded border border-green-800/50 max-w-[300px] space-y-0.5">
         <div>clicks: {debug.clickCount}</div>
         <div>aoiMeta: {aoiMeta ? 'yes' : 'no'}</div>
+        <div>hasShape: {aoiMeta?.shape ? 'yes' : 'NO'}</div>
+        <div>hasTransform: {aoiMeta?.transform ? 'yes' : 'NO'}</div>
+        <div>hasCrsNative: {aoiMeta?.crs_native ? 'yes' : 'NO'}</div>
+        <div className="truncate" title={aoiMeta?.crs_native ?? ''}>
+          crsNative: {aoiMeta?.crs_native ?? '-'}
+        </div>
         <div>row/col: {debug.lastRow ?? '-'} / {debug.lastCol ?? '-'}</div>
         <div className="truncate" title={debug.lastTileUrl ?? ''}>
           tile: {debug.lastTileUrl ? debug.lastTileUrl.split('/').pop() : '-'}
