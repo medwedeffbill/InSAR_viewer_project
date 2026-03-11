@@ -5,9 +5,9 @@ description: >
   on the Palos Verdes Peninsula near Los Angeles. Sentinel-1 time series reveal
   seasonal acceleration patterns tied to rainfall and groundwater, with rates
   exceeding 100 mm/yr in the most active lobes.
-bbox: [-118.42, 33.72, -118.30, 33.80]
-center: [-118.36, 33.76]
-zoom: 13
+bbox: [-118.45, 33.69, -118.23, 33.80]
+center: [-118.34, 33.745]
+zoom: 12
 featured: true
 case_study: "landslide-creep"
 
@@ -17,8 +17,8 @@ sentinel1:
   polarization: VV
 
 date_range:
-  start: "2020-01-01"
-  end: "2024-06-01"
+  start: "2019-01-01"
+  end: "2025-12-31"
 
 hyp3:
   job_type: INSAR_GAMMA
@@ -26,7 +26,7 @@ hyp3:
   include_dem: true
   include_inc_map: true
   apply_water_mask: true
-  max_jobs: 300      # more pairs for longer record
+  max_jobs: 350      # ~6-year window; ~270 scenes × ~1.3 pairs each
 
 mintpy:
   processor: hyp3
